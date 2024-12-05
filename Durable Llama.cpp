@@ -16,16 +16,17 @@
 #include <mutex>
 #include <chrono>
 
-volatile sig_atomic_t terminate_requested = 0; // global flag for singal handling
+// global flag for signal handling
 // called async, so we need to make sure the compiler doesn't change it
+volatile sig_atomic_t terminate_requested = 0;
 
-// graceful termination
+// graceful termination, takes signals like sigterm, sigkill
 void signal_handler(int signum) {
     terminate_requested = 1;
 }
 
-
-struct RPCServer { // rpc server endpoint
+// grabs the rpc server address and port from command line
+struct RPCServer {
     std::string address;
     std::string ip;
     int port;
@@ -122,6 +123,9 @@ private:
                 }
             }
 
+            // condition where haven't received output in 5 seconds, but servers are still reachable
+            // could mean that servers are in a bad state, responding to TCP connections, but
+            // not processing inference requests properly
             if (!any_server_removed) {
                 std::cout << "All RPC servers are reachable, but no output received. Restarting inference..." << std::endl;
             } else if (std::none_of(servers.begin(), servers.end(), [](const RPCServer& s){ return s.available; })) {
