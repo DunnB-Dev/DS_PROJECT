@@ -16,33 +16,44 @@
 #include <mutex>
 #include <chrono>
 
+using std::string;
+using std::to_string;
+using std::stoi;
+using std::vector;
+using std::cout;
+using std::cerr;
+using std::endl;
+using std::flush;
+using std::mutex;
+using std::chrono;
+
 // global flag for signal handling
 // called async, so we need to make sure the compiler doesn't change it
-volatile sig_atomic_t terminate_requested = 0;
+volatile sig_atomic_t terminateRequested = 0;
 
 // graceful termination, takes signals like sigterm, sigkill
-void signal_handler(int signum) {
-    terminate_requested = 1;
+void signalHandler(int signum) {
+    terminateRequested = 1;
 }
 
 // grabs the rpc server address and port from command line
 struct RPCServer {
-    std::string address;
-    std::string ip;
+    string address;
+    string ip;
     int port;
     bool available;
 
-    RPCServer(const std::string& addr) : // constructor to initialize and parse addr
+    RPCServer(const string& addr) : // constructor to initialize and parse addr
         address(addr),
         available(true) {
-        parse_address();
+        parseAddress();
     }
 
-    void parse_address() { // parse addr into IP and port
+    void parseAddress() { // parse addr into IP and port
         size_t colon_pos = address.find(':');
-        if (colon_pos != std::string::npos) {
+        if (colon_pos != string::npos) {
             ip = address.substr(0, colon_pos);
-            port = std::stoi(address.substr(colon_pos + 1));
+            port = stoi(address.substr(colon_pos + 1));
         } else {
             ip = address;
             port = 50053; // RPC port for the PIs
@@ -52,30 +63,30 @@ struct RPCServer {
 
 class DurableLLaMA {
 private:
-    std::vector<RPCServer> servers; // rpc servers in the cluster
-    std::vector<std::string> original_args; // cli arrguments from llama-cli
-    pid_t llama_process; // PID of llamacpp
-    std::mutex mtx; // thread mutex
-    bool should_continue; // control flag for continue loop
+    vector<RPCServer> servers; // rpc servers in the cluster
+    vector<string> originalArgs; // cli arrguments from llama-cli
+    pid_t llamaProcess; // PID of llamacpp
+    mutex mtx; // thread mutex
+    bool shouldContinue; // control flag for continue loop
     int original_ngl; // gpu layers from llama-cli
     int stdout_pipe[2];
     int stderr_pipe[2];
-    std::chrono::steady_clock::time_point last_output_time; // last output timer
+    chrono::steady_clock::time_point lastOutputTime; // last output timer
 
-    std::string build_rpc_string() { // string of available RPC servers
-        std::string rpc_servers;
+    string buildRPCstring() { // string of available RPC servers
+        string rpcServers;
         bool first = true;
         for (auto& server : servers) {
             if (server.available) {
-                if (!first) rpc_servers += ",";
-                rpc_servers += server.address;
+                if (!first) rpcServers += ",";
+                rpcServers += server.address;
                 first = false;
             }
         }
-        return rpc_servers;
+        return rpcServers;
     }
 
-    bool is_server_reachable(const std::string& ip, int port) { // open a TCP connection to see if server is reachable
+    bool isServerReachable(const string& ip, int port) { // open a TCP connection to see if server is reachable
         int sockfd;
         struct sockaddr_in serv_addr;
         sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -106,68 +117,78 @@ private:
     }
 
     // inference status check
-    void check_inference_status() {
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            now - last_output_time).count();
+    void checkInferenceStatus() {
+        auto now = chrono::steady_clock::now();
+        auto elapsed = chrono::duration_cast<chrono::seconds>(
+            now - lastOutputTime).count();
 
         if (elapsed >= 5) { // restarts inference on remaining PIs if no server is available
-            std::cout << "\nNo output received for 5 seconds, attempting restart..." << std::endl;
+            cout << "\nNo output received for 5 seconds, attempting restart..." << endl;
 
-            bool any_server_removed = false;
+            bool anyServerRemoved = false;
             for (auto& server : servers) {
-                if (server.available && !is_server_reachable(server.ip, server.port)) {
+                if (server.available && !isServerReachable(server.ip, server.port)) {
                     server.available = false;
-                    any_server_removed = true;
-                    std::cout << "Removing unreachable server " << server.address << " and trying again..." << std::endl;
+                    anyServerRemoved = true;
+                    cout << "Removing unreachable server " << server.address << " and trying again..." << endl;
                 }
             }
 
             // condition where haven't received output in 5 seconds, but servers are still reachable
             // could mean that servers are in a bad state, responding to TCP connections, but
             // not processing inference requests properly
-            if (!any_server_removed) {
-                std::cout << "All RPC servers are reachable, but no output received. Restarting inference..." << std::endl;
-            } else if (std::none_of(servers.begin(), servers.end(), [](const RPCServer& s){ return s.available; })) {
-                std::cout << "No reachable RPC servers available, falling back to CPU..." << std::endl;
+            if (!anyServerRemoved) {
+                cout << "All RPC servers are reachable, but no output received. Restarting inference..." << endl;
+            } else {
+                // Check if all servers are unavailable
+                bool allServersDown = true;
+                for (const auto& server : servers) {
+                    if (server.available) {
+                        allServersDown = false;   // still have a server available
+                        break;
+                    }
+                }
+                if (allServersDown) {
+                    cout << "No reachable RPC servers available, falling back to CPU..." << endl;
+                }
             }
 
-            restart_llama();
+            restartLlama();
         }
     }
 
-    std::vector<char*> build_command_args() { //extracts and rebuilds command line args from llama.cpp
-        std::vector<char*> args;
+    vector<char*> buildCommandArgs() { //extracts and rebuilds command line args from llama.cpp
+        vector<char*> args;
         args.push_back(strdup("./llama-cli"));
 
-        bool skip_next = false;
-        std::string rpc_servers = build_rpc_string();
+        bool skipNext = false;
+        string rpcServers = buildRPCstring();
 
         // Check if we have any available RPC servers, if not, fallback to CPU only
-        bool is_fallback = rpc_servers.empty();
+        bool isFallback = rpcServers.empty();
 
-        for (size_t i = 0; i < original_args.size(); i++) { // process all llama-cli arguments except RPC and NGL
-            if (skip_next) {
-                skip_next = false;
+        for (size_t i = 0; i < originalArgs.size(); i++) { // process all llama-cli arguments except RPC and NGL
+            if (skipNext) {
+                skipNext = false;
                 continue;
             }
 
             // Skip existing RPC and ngl arguments
-            if (original_args[i] == "--rpc" ||
-                original_args[i] == "-ngl" ||
-                original_args[i] == "--n-gpu-layers") {
-                skip_next = true;
+            if (originalArgs[i] == "--rpc" ||
+                originalArgs[i] == "-ngl" ||
+                originalArgs[i] == "--n-gpu-layers") {
+                skipNext = true;
                 continue;
             }
 
-            args.push_back(strdup(original_args[i].c_str()));
+            args.push_back(strdup(originalArgs[i].c_str()));
         }
 
-        if (!is_fallback) { // add RPC and ngl arguments from command line
+        if (!isFallback) { // add RPC and ngl arguments from command line
             args.push_back(strdup("--rpc"));
-            args.push_back(strdup(rpc_servers.c_str()));
+            args.push_back(strdup(rpcServers.c_str()));
             args.push_back(strdup("-ngl"));
-            args.push_back(strdup(std::to_string(original_ngl).c_str()));
+            args.push_back(strdup(to_string(original_ngl).c_str()));
         } else {
             args.push_back(strdup("-ngl"));
             args.push_back(strdup("0"));  // if all RPC servers fail
@@ -177,11 +198,11 @@ private:
         return args;
     }
 
-    void restart_llama() {
-        if (llama_process > 0) {
-            kill(llama_process, SIGTERM); // kill llama.cli if it's already running
+    void restartLlama() {
+        if (llamaProcess > 0) {
+            kill(llamaProcess, SIGTERM); // kill llama.cli if it's already running
             int status;
-            waitpid(llama_process, &status, 0);
+            waitpid(llamaProcess, &status, 0);
         }
 
         if (stdout_pipe[0] != -1) close(stdout_pipe[0]); // pipe cleaning and reinstantiation
@@ -189,10 +210,10 @@ private:
 
         pipe(stdout_pipe);
 
-        auto args = build_command_args();
+        auto args = buildCommandArgs();
 
-        llama_process = fork(); // fork and execute llama-cli binary
-        if (llama_process == 0) {
+        llamaProcess = fork(); // fork and execute llama-cli binary
+        if (llamaProcess == 0) {
             dup2(stdout_pipe[1], STDOUT_FILENO);
             dup2(stdout_pipe[1], STDERR_FILENO); // redirect stderr to stdout
             close(stdout_pipe[0]);
@@ -211,11 +232,10 @@ private:
             if (arg) free(arg);
         }
 
-        last_output_time = std::chrono::steady_clock::now(); // check if inference is still working
+        lastOutputTime = chrono::steady_clock::now(); // check if inference is still working
     }
 
-
-    void monitor_output() {
+    void monitorOutput() {
         fd_set read_fds;
         struct timeval tv;
         int retval;
@@ -237,108 +257,108 @@ private:
                 ssize_t n = read(stdout_pipe[0], buffer, sizeof(buffer) - 1);
                 if (n > 0) {
                     buffer[n] = '\0';
-                    std::cout << buffer << std::flush;
-                    last_output_time = std::chrono::steady_clock::now();
+                    cout << buffer << flush;
+                    lastOutputTime = chrono::steady_clock::now();
                 }
             }
         }
     }
 
 
-    int find_ngl_value() { // get gpu layers from CLI arguments
-        for (size_t i = 0; i < original_args.size() - 1; i++) {
-            if (original_args[i] == "-ngl" || original_args[i] == "--n-gpu-layers") {
-                return std::stoi(original_args[i + 1]);
+    int findNglValue() { // get gpu layers from CLI arguments
+        for (size_t i = 0; i < originalArgs.size() - 1; i++) {
+            if (originalArgs[i] == "-ngl" || originalArgs[i] == "--n-gpu-layers") {
+                return stoi(originalArgs[i + 1]);
             }
         }
         return 99;  // offload all layers by default
     }
 
 public:
-    DurableLLaMA(const std::vector<std::string>& server_addresses, int argc, char** argv) // constructor for server addresses andd CLI args
-        : llama_process(-1),
-          should_continue(true) {
+    DurableLLaMA(const vector<string>& server_addresses, int argc, char** argv) // constructor for server addresses andd CLI args
+        : llamaProcess(-1),
+          shouldContinue(true) {
 
         for (const auto& addr : server_addresses) {
             servers.emplace_back(addr);
         }
 
         for (int i = 1; i < argc; i++) {
-            original_args.push_back(argv[i]);
+            originalArgs.push_back(argv[i]);
         }
 
-        original_ngl = find_ngl_value();
+        original_ngl = findNglValue();
         stdout_pipe[0] = stdout_pipe[1] = -1;
         stderr_pipe[0] = stderr_pipe[1] = -1;
-        last_output_time = std::chrono::steady_clock::now();
+        lastOutputTime = chrono::steady_clock::now();
     }
 
     void run() {
-        restart_llama();
+        restartLlama();
 
-        while (should_continue && !terminate_requested) {
-            monitor_output();
-            check_inference_status();
+        while (shouldContinue && !terminateRequested) {
+            monitorOutput();
+            checkInferenceStatus();
 
             int status; // see if process is terminated
-            pid_t result = waitpid(llama_process, &status, WNOHANG);
+            pid_t result = waitpid(llamaProcess, &status, WNOHANG);
 
-            if (result == llama_process) {
+            if (result == llamaProcess) {
                 if (WIFEXITED(status)) {
                     int exit_status = WEXITSTATUS(status);
-                    std::cout << "LLaMA process exited with status " << exit_status << "." << std::endl;
+                    cout << "LLaMA process exited with status " << exit_status << "." << endl;
                     if (exit_status == 0) {
                         // Inference completed successfully
-                        should_continue = false;
+                        shouldContinue = false;
                     } else {
                         // Non-zero exit status, restart
-                        std::cout << "LLaMA process exited with non-zero status. Restarting..." << std::endl;
-                        restart_llama();
+                        cout << "LLaMA process exited with non-zero status. Restarting..." << endl;
+                        restartLlama();
                     }
                 } else if (WIFSIGNALED(status)) {
-                    std::cout << "LLaMA process was terminated by a signal. Restarting..." << std::endl;
-                    restart_llama();
+                    cout << "LLaMA process was terminated by a signal. Restarting..." << endl;
+                    restartLlama();
                 }
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(chrono::milliseconds(100));
         }
 
         // Clean up before exiting
-        if (llama_process > 0) {
-            kill(llama_process, SIGTERM);
+        if (llamaProcess > 0) {
+            kill(llamaProcess, SIGTERM);
             int status;
-            waitpid(llama_process, &status, 0);
+            waitpid(llamaProcess, &status, 0);
         }
     }
 };
 
 int main(int argc, char** argv) {
-    std::vector<std::string> rpc_servers;
+    vector<string> rpcServers;
 
     // Register signal handler for graceful termination
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
+    signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
 
     for (int i = 1; i < argc - 1; i++) { // parse server addresses from command line
         if (strcmp(argv[i], "--rpc") == 0) {
-            std::string servers = argv[i + 1];
+            string servers = argv[i + 1];
             size_t pos = 0;
-            while ((pos = servers.find(',')) != std::string::npos) {
-                rpc_servers.push_back(servers.substr(0, pos));
+            while ((pos = servers.find(',')) != string::npos) {
+                rpcServers.push_back(servers.substr(0, pos));
                 servers.erase(0, pos + 1);
             }
-            rpc_servers.push_back(servers);
+            rpcServers.push_back(servers);
             break;
         }
     }
 
-    if (rpc_servers.empty()) {
-        std::cerr << "Usage: " << argv[0] << " [llama.cpp options] --rpc server1:port1,server2:port2,...\n";
+    if (rpcServers.empty()) {
+        cerr << "Usage: " << argv[0] << " [llama.cpp options] --rpc server1:port1,server2:port2,...\n";
         return 1;
     }
 
-    DurableLLaMA llama(rpc_servers, argc, argv); //create and run wrapper
+    DurableLLaMA llama(rpcServers, argc, argv); //create and run wrapper
     llama.run();
 
     return 0;
