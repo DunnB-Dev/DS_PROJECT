@@ -16,7 +16,7 @@
 #include <mutex>
 #include <chrono>
 
-volatile sig_atomic_t terminate_requested = 0; // global flag for singal handling
+volatile sig_atomic_t terminate_requested = 0; // global flag for signal handling
 // called async, so we need to make sure the compiler doesn't change it
 
 // graceful termination
@@ -64,28 +64,29 @@ private:
     std::string build_rpc_string() { // string of available RPC servers
         std::string rpc_servers;
         bool first = true;
-        for (auto& server : servers) {
-            if (server.available) {
-                if (!first) rpc_servers += ",";
-                rpc_servers += server.address;
+        for (auto& server : servers) { // for all servers
+            if (server.available) { // check if available
+                if (!first) rpc_servers += ","; // separate them
+                rpc_servers += server.address; //
                 first = false;
             }
         }
         return rpc_servers;
     }
+    // builts to format "ip1:port1,ip2:port2, etc"
 
     bool is_server_reachable(const std::string& ip, int port) { // open a TCP connection to see if server is reachable
         int sockfd;
         struct sockaddr_in serv_addr;
-        sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
+        sockfd = socket(AF_INET, SOCK_STREAM, 0); // ipv4, tcp
+        if (sockfd < 0) { // check if socket creation failed
             perror("socket");
             return false;
         }
 
         memset(&serv_addr, 0, sizeof(serv_addr)); // server address setup stuff
         serv_addr.sin_family = AF_INET;
-        serv_addr.sin_port = htons(port);
+        serv_addr.sin_port = htons(port); // convert port to network byte order
 
         if (inet_pton(AF_INET, ip.c_str(), &serv_addr.sin_addr) <= 0) { // IP is convered to binary
             close(sockfd);
@@ -95,37 +96,38 @@ private:
         struct timeval tv;
         tv.tv_sec = 5; // 5-second timeout
         tv.tv_usec = 0;
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv); // set socket options for send and receive timeout
         setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof tv);
 
         int result = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)); // connect attempt
         close(sockfd);
 
-        return result == 0;
+        return result == 0; // return true if connection succeeded
     }
 
     // inference status check
     void check_inference_status() {
-        auto now = std::chrono::steady_clock::now();
+        auto now = std::chrono::steady_clock::now(); // get current time
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            now - last_output_time).count();
+            now - last_output_time).count(); // calc time since last output
 
         if (elapsed >= 5) { // restarts inference on remaining PIs if no server is available
             std::cout << "\nNo output received for 5 seconds, attempting restart..." << std::endl;
 
-            bool any_server_removed = false;
+            bool any_server_removed = false; // initialized server removal flag to false
             for (auto& server : servers) {
-                if (server.available && !is_server_reachable(server.ip, server.port)) {
+                if (server.available && !is_server_reachable(server.ip, server.port)) { // if server is marked available but can't be reached
                     server.available = false;
                     any_server_removed = true;
                     std::cout << "Removing unreachable server " << server.address << " and trying again..." << std::endl;
+                    // mark unavailable, set removal flag, log removal
                 }
             }
 
             if (!any_server_removed) {
-                std::cout << "All RPC servers are reachable, but no output received. Restarting inference..." << std::endl;
-            } else if (std::none_of(servers.begin(), servers.end(), [](const RPCServer& s){ return s.available; })) {
-                std::cout << "No reachable RPC servers available, falling back to CPU..." << std::endl;
+                std::cout << "All RPC servers are reachable, but no output received. Restarting inference..." << std::endl; // for stalled inference
+            } else if (std::none_of(servers.begin(), servers.end(), [](const RPCServer& s){ return s.available; })) { // if all servers are unavailable
+                std::cout << "No reachable RPC servers available, falling back to CPU..." << std::endl; // fallback to cpu
             }
 
             restart_llama();
@@ -133,11 +135,11 @@ private:
     }
 
     std::vector<char*> build_command_args() { //extracts and rebuilds command line args from llama.cpp
-        std::vector<char*> args;
-        args.push_back(strdup("./llama-cli"));
+        std::vector<char*> args; // vector for cli arguments
+        args.push_back(strdup("./llama-cli")); // add exec name for first arg
 
-        bool skip_next = false;
-        std::string rpc_servers = build_rpc_string();
+        bool skip_next = false; // skip args
+        std::string rpc_servers = build_rpc_string(); //get string of available servers
 
         // Check if we have any available RPC servers, if not, fallback to CPU only
         bool is_fallback = rpc_servers.empty();
@@ -156,7 +158,7 @@ private:
                 continue;
             }
 
-            args.push_back(strdup(original_args[i].c_str()));
+            args.push_back(strdup(original_args[i].c_str())); // add args to vector
         }
 
         if (!is_fallback) { // add RPC and ngl arguments from command line
@@ -169,7 +171,7 @@ private:
             args.push_back(strdup("0"));  // if all RPC servers fail
         }
 
-        args.push_back(nullptr);
+        args.push_back(nullptr); // null term for execv
         return args;
     }
 
@@ -185,16 +187,16 @@ private:
 
         pipe(stdout_pipe);
 
-        auto args = build_command_args();
+        auto args = build_command_args(); // build argument array for new process
 
         llama_process = fork(); // fork and execute llama-cli binary
-        if (llama_process == 0) {
+        if (llama_process == 0) { // if code runs in child proccess
             dup2(stdout_pipe[1], STDOUT_FILENO);
             dup2(stdout_pipe[1], STDERR_FILENO); // redirect stderr to stdout
             close(stdout_pipe[0]);
-            close(stdout_pipe[1]);
+            close(stdout_pipe[1]); //close pipe
 
-            execv("./llama-cli", args.data());
+            execv("./llama-cli", args.data()); //replace child process with llama-cli
             perror("execv failed");
             exit(1);
         }
@@ -211,30 +213,30 @@ private:
     }
 
 
-    void monitor_output() {
+    void monitor_output() { // read and handle output from llama-cli process
         fd_set read_fds;
         struct timeval tv;
-        int retval;
+        int retval; //file descriptor set, timeout struct, and return value for select()
 
         FD_ZERO(&read_fds);
-        FD_SET(stdout_pipe[0], &read_fds);
+        FD_SET(stdout_pipe[0], &read_fds); // init file descriptor sedd and add pipe read end
 
-        // Set timeout to 1 second
+
         tv.tv_sec = 1;
         tv.tv_usec = 0;
 
-        retval = select(stdout_pipe[0] + 1, &read_fds, NULL, NULL, &tv);
+        retval = select(stdout_pipe[0] + 1, &read_fds, NULL, NULL, &tv); // wait for data pipe
 
         if (retval == -1) {
-            perror("select()");
+            perror("select()"); // error handling
         } else if (retval > 0) { //read and display output from llama-cli's inference engine
             if (FD_ISSET(stdout_pipe[0], &read_fds)) {
                 char buffer[4096];
-                ssize_t n = read(stdout_pipe[0], buffer, sizeof(buffer) - 1);
+                ssize_t n = read(stdout_pipe[0], buffer, sizeof(buffer) - 1); // create buffer and read tokens from pipe
                 if (n > 0) {
-                    buffer[n] = '\0';
+                    buffer[n] = '\0'; // if data was read, null term string
                     std::cout << buffer << std::flush;
-                    last_output_time = std::chrono::steady_clock::now();
+                    last_output_time = std::chrono::steady_clock::now(); // ouput toks and update output timestamp
                 }
             }
         }
@@ -252,34 +254,32 @@ private:
 
 public:
     DurableLLaMA(const std::vector<std::string>& server_addresses, int argc, char** argv) // constructor for server addresses andd CLI args
-        : llama_process(-1),
-          should_continue(true) {
+        : llama_process(-1), // start with invalid process ID
+          should_continue(true) { // set continue flag to true
 
-        for (const auto& addr : server_addresses) {
-            servers.emplace_back(addr);
+        for (const auto& addr : server_addresses) { // create rpc server objects for each address and add to server vectors
+            servers.emplace_back(addr); // construct object in place
         }
 
-        for (int i = 1; i < argc; i++) {
+        for (int i = 1; i < argc; i++) { // store command line args
             original_args.push_back(argv[i]);
         }
 
-        original_ngl = find_ngl_value();
+        original_ngl = find_ngl_value(); // get gpu layers
         stdout_pipe[0] = stdout_pipe[1] = -1;
-        stderr_pipe[0] = stderr_pipe[1] = -1;
-        last_output_time = std::chrono::steady_clock::now();
+        stderr_pipe[0] = stderr_pipe[1] = -1; // initialize pipe descriptors (no valid fd)
+        last_output_time = std::chrono::steady_clock::now(); // initialize timestamp to current time
     }
 
     void run() {
-        restart_llama();
-
-        while (should_continue && !terminate_requested) {
+        restart_llama(); // start llama-cli process
+        while (should_continue && !terminate_requested) { // loop until terminated
             monitor_output();
-            check_inference_status();
-
+            check_inference_status(); // see if inference is still running
             int status; // see if process is terminated
-            pid_t result = waitpid(llama_process, &status, WNOHANG);
+            pid_t result = waitpid(llama_process, &status, WNOHANG); // non-blocking check
 
-            if (result == llama_process) {
+            if (result == llama_process) { // if terminated
                 if (WIFEXITED(status)) {
                     int exit_status = WEXITSTATUS(status);
                     std::cout << "LLaMA process exited with status " << exit_status << "." << std::endl;
@@ -296,10 +296,8 @@ public:
                     restart_llama();
                 }
             }
-
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
-
         // Clean up before exiting
         if (llama_process > 0) {
             kill(llama_process, SIGTERM);
@@ -309,22 +307,23 @@ public:
     }
 };
 
-int main(int argc, char** argv) {
-    std::vector<std::string> rpc_servers;
+int main(int argc, char** argv) { // for command line arguments
+    std::vector<std::string> rpc_servers; // store rpc server addresses in a vector
 
     // Register signal handler for graceful termination
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    // handlers for interrupt signals
 
     for (int i = 1; i < argc - 1; i++) { // parse server addresses from command line
         if (strcmp(argv[i], "--rpc") == 0) {
             std::string servers = argv[i + 1];
-            size_t pos = 0;
-            while ((pos = servers.find(',')) != std::string::npos) {
+            size_t pos = 0; // get server string and position
+            while ((pos = servers.find(',')) != std::string::npos) { // while there are still RPC servers
                 rpc_servers.push_back(servers.substr(0, pos));
-                servers.erase(0, pos + 1);
+                servers.erase(0, pos + 1); // extract addresses and remove from string
             }
-            rpc_servers.push_back(servers);
+            rpc_servers.push_back(servers); // add final server address
             break;
         }
     }
